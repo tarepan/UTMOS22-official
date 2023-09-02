@@ -26,23 +26,33 @@ class ChangeSampleRate(nn.Module):
         output = round_down * (1. - indices.fmod(1.)).unsqueeze(0) + round_up * indices.fmod(1.).unsqueeze(0)
         return output
 
+# The model (same as `predict.py`)
 model = lightning_module.BaselineLightningModule.load_from_checkpoint("epoch=3-step=7459.ckpt").eval()
 
 
 def calc_mos(audio_path):
+    # Load
     wav, sr = torchaudio.load(audio_path)
-    osr = 16_000
     batch = wav.unsqueeze(0).repeat(10, 1, 1)
+
+    # Resampling
+    osr = 16_000
     csr = ChangeSampleRate(sr, osr)
     out_wavs = csr(wav)
+
+    # Data preparation - - domain0 / judgeID288 (same as `predict.py`/`score.py`)
     batch = {
         'wav': out_wavs,
         'domains': torch.tensor([0]),
         'judge_id': torch.tensor([288])
     }
+
+    # Forward - (same as `predict.py`/`score.py`)
     with torch.no_grad():
         output = model(batch)
-    return output.mean(dim=1).squeeze().detach().numpy()*2 + 3
+    calculated_score = output.mean(dim=1).squeeze().detach().numpy()*2 + 3
+
+    return calculated_score
 
 
 description ="""

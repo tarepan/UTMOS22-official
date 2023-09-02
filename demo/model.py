@@ -9,6 +9,8 @@ import hydra
 
 
 def load_ssl_model(cp_path):
+    """Load SSL model with wrapper."""
+
     ssl_model_type = cp_path.split("/")[-1]
     wavlm =  "WavLM" in ssl_model_type
     if wavlm:
@@ -37,20 +39,39 @@ def load_ssl_model(cp_path):
 
 
 class SSL_model(nn.Module):
-    def __init__(self,ssl_model,ssl_out_dim,wavlm) -> None:
-        super(SSL_model,self).__init__()
+    """SSL model wrapper."""
+
+    def __init__(self, ssl_model, ssl_out_dim, wavlm) -> None:
+        super().__init__()
+
         self.ssl_model, self.ssl_out_dim = ssl_model, ssl_out_dim
         self.WavLM = wavlm
 
-    def forward(self,batch):
+    def forward(self, batch):
+        """
+        Args:
+            batch
+                wav         :: Tensor
+                domains     :: Tensor
+                judge_id    :: Tensor
+        Returns:
+            {
+                ssl-feature :: Tensor
+            }
+        """
+
+        # Data preparation
         wav = batch['wav'] 
         wav = wav.squeeze(1) # [batches, audio_len]
+
+        # Forward
         if self.WavLM:
             x = self.ssl_model.extract_features(wav)[0]
         else:
-            res = self.ssl_model(wav, mask=False, features_only=True)
-            x = res["x"]
-        return {"ssl-feature":x}
+            x = self.ssl_model(wav, mask=False, features_only=True)["x"]
+
+        return { "ssl-feature": x }
+
     def get_output_dim(self):
         return self.ssl_out_dim
 
@@ -104,12 +125,26 @@ class PhonemeEncoder(nn.Module):
 
 
 class DomainEmbedding(nn.Module):
-    def __init__(self,n_domains,domain_dim) -> None:
+    def __init__(self, n_domains: int, domain_dim: int) -> None:
         super().__init__()
-        self.embedding = nn.Embedding(n_domains,domain_dim)
+
+        self.embedding = nn.Embedding(n_domains, domain_dim)
         self.output_dim = domain_dim
+
     def forward(self, batch):
+        """
+        Args:
+            batch
+                wav         :: Tensor
+                domains     :: Tensor
+                judge_id    :: Tensor
+        Returns:
+            {
+                domain-feature :: Tensor
+            }
+        """
         return {"domain-feature": self.embedding(batch['domains'])}
+
     def get_output_dim(self):
         return self.output_dim
 
@@ -120,32 +155,47 @@ class LDConditioner(nn.Module):
     '''
     def __init__(self,input_dim, judge_dim, num_judges=None):
         super().__init__()
+
         self.input_dim = input_dim
         self.judge_dim = judge_dim
         self.num_judges = num_judges
-        assert num_judges !=None
+        assert num_judges != None
         self.judge_embedding = nn.Embedding(num_judges, self.judge_dim)
-        # concat [self.output_layer, phoneme features]
-        
+
         self.decoder_rnn = nn.LSTM(
             input_size = self.input_dim + self.judge_dim,
             hidden_size = 512,
             num_layers = 1,
             batch_first = True,
             bidirectional = True
-        ) # linear?
+        )
         self.out_dim = self.decoder_rnn.hidden_size*2
 
     def get_output_dim(self):
         return self.out_dim
 
-
     def forward(self, x, batch):
+        """
+        Args:
+            x
+                ssl-feature    :: Tensor
+                domain-feature :: Tensor
+            batch
+                wav            :: Tensor
+                domains        :: Tensor
+                judge_id       :: Tensor
+        Returns:
+        """
+
         judge_ids = batch['judge_id']
+
+        # Feature concatenation
+        ##
         if 'phoneme-feature' in x.keys():
             concatenated_feature = torch.cat((x['ssl-feature'], x['phoneme-feature'].unsqueeze(1).expand(-1,x['ssl-feature'].size(1) ,-1)),dim=2)
         else:
             concatenated_feature = x['ssl-feature']
+        ##
         if 'domain-feature' in x.keys():
             concatenated_feature = torch.cat(
                 (
@@ -156,6 +206,7 @@ class LDConditioner(nn.Module):
                 ),
                 dim=2,
             )
+        ##
         if judge_ids != None:
             concatenated_feature = torch.cat(
                 (
@@ -166,25 +217,30 @@ class LDConditioner(nn.Module):
                 ),
                 dim=2,
             )
-            decoder_output, (h, c) = self.decoder_rnn(concatenated_feature)
+
+        # Forward
+            decoder_output, _ = self.decoder_rnn(concatenated_feature)
+
         return decoder_output
+
 
 class Projection(nn.Module):
     def __init__(self, input_dim, hidden_dim, activation, range_clipping=False):
-        super(Projection, self).__init__()
+        super().__init__()
+
         self.range_clipping = range_clipping
-        output_dim = 1
+        self.output_dim = 1
         if range_clipping:
             self.proj = nn.Tanh()
-        
+
+        # SegFC-σ-Do-SegFC
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             activation,
             nn.Dropout(0.3),
-            nn.Linear(hidden_dim, output_dim),
+            nn.Linear(hidden_dim, self.output_dim),
         )
-        self.output_dim = output_dim
-    
+
     def forward(self, x, batch):
         output = self.net(x)
 
@@ -193,5 +249,6 @@ class Projection(nn.Module):
             return self.proj(output) * 2.0 + 3
         else:
             return output
+
     def get_output_dim(self):
         return self.output_dim
