@@ -9,6 +9,7 @@ from lightning_module import BaselineLightningModule
 
 UTMOS_CKPT_URL = "https://huggingface.co/spaces/sarulab-speech/UTMOS-demo/resolve/main/epoch%3D3-step%3D7459.ckpt"
 
+
 class UTMOSScore(nn.Module):
     """Predicting score for each audio clip.
 
@@ -24,38 +25,26 @@ class UTMOSScore(nn.Module):
             download_file(UTMOS_CKPT_URL, filepath)
         self.model = BaselineLightningModule.load_from_checkpoint(filepath, map_location="cpu").eval()
 
-    @property
-    def device(self):
-        """Current device."""
-        return next(self.parameters()).device
-
     def score(self, wavs: Tensor) -> Tensor:
         """
         Args:
-            wavs: audio waveform to be evaluated. When len(wavs) == 1 or 2,
-                the model processes the input as a single audio clip. The model
-                performs batch processing when len(wavs) == 3.
+            wavs :: (T,) | (B, T) - audio waveform(s)
         """
-        # :: -> (B, )
+        # :: (T,) | (B, T) -> (B, T)
         if len(wavs.shape) == 1:
-            out_wavs = wavs.unsqueeze(0).unsqueeze(0)
-        elif len(wavs.shape) == 2:
             out_wavs = wavs.unsqueeze(0)
-        elif len(wavs.shape) == 3:
+        elif len(wavs.shape) == 2:
             out_wavs = wavs
         else:
-            raise ValueError("Dimension of input tensor needs to be <= 3.")
+            raise ValueError("Dimension of input tensor needs to be <= 2.")
 
-        bs = out_wavs.shape[0]
-        batch = {
-            "wav": out_wavs,
-            "domains": torch.zeros(bs, dtype=torch.int).to(self.device),
-            "judge_id": torch.ones(bs, dtype=torch.int).to(self.device) * 288,
-        }
         with torch.no_grad():
-            output = self.model(batch)
+            output = self.model(out_wavs)
 
         return output.mean(dim=1).squeeze(1).cpu().detach() * 2 + 3
+
+    def prepare(self) -> None:
+        self.model.prepare()
 
 
 def download_file(url, filename):
@@ -93,11 +82,12 @@ if __name__ == '__main__':
     import librosa
 
     utmos_model = UTMOSScore()
+    utmos_model.prepare()
 
-    wave, sr_org = librosa.load("sample.wav", sr=None)
+    wave, sr_org = librosa.load("sample.wav", sr=None, mono=True)
     wave = torch.from_numpy(wave).unsqueeze(0)
     wave_pred_16k = torchaudio.functional.resample(wave, orig_freq=sr_org, new_freq=16000)
 
-    # :: (B, T) -> (B, 1, T) -> [scoring] -> ?
-    utmos_score = utmos_model.score(wave_pred_16k.unsqueeze(1)).mean()
+    # :: (B, 1, T) -> [scoring] -> ?
+    utmos_score = utmos_model.score(wave_pred_16k).mean()
     print(utmos_score)
